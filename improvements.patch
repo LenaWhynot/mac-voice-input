@@ -1,5 +1,5 @@
 diff --git a/examples/voice_dictation.py b/examples/voice_dictation.py
-index ab996a3..473150d 100644
+index ab996a3..741c41c 100644
 --- a/examples/voice_dictation.py
 +++ b/examples/voice_dictation.py
 @@ -517,20 +517,28 @@ def paste_from_clipboard() -> None:
@@ -105,7 +105,7 @@ index ab996a3..473150d 100644
          except Exception as e:
              print(f"❌ Recording failed: {e}")
              state.is_recording = False
-@@ -1022,23 +1065,31 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1022,23 +1065,45 @@ def main_loop(cfg: dict, cfg_path: Path):
                      # Если предыдущая диктовка была недавно — начинаем
                      # новую с переноса строки. Порог 30s — «продолжаем
                      # в то же место»; после большой паузы вставка чистая.
@@ -126,6 +126,8 @@ index ab996a3..473150d 100644
 -                    saved_clipboard = save_clipboard() if cfg.get("auto_paste") else None
 +                    # Кладём текст и в буфер (бэкап: если печать не сработает —
 +                    # вставишь вручную Cmd+V). Буфер НЕ восстанавливаем.
++                    # Текст в буфер: и для мгновенной вставки Cmd+V, и как ручной
++                    # фолбэк (если авто-вставка не сработает — Cmd+V руками).
                      copy_to_clipboard(text_to_paste)
                      if cfg.get("auto_paste"):
 -                        time.sleep(0.25)  # дать целевому полю стать активным
@@ -135,20 +137,58 @@ index ab996a3..473150d 100644
 -                        # прочитать диктованный текст до того, как мы
 -                        # вернём оригинал.
 -                        restore_clipboard_deferred(saved_clipboard, delay_sec=1.0)
-+                        time.sleep(0.2)  # дать целевому полю стать активным после тыка
-+                        # Прямая печать через pynput — надёжнее Cmd+V/osascript
-+                        # на этом маке (osascript keystroke = "not allowed/timeout",
-+                        # вставка через буфер не срабатывала). type() шлёт unicode
-+                        # напрямую, работает с кириллицей независимо от раскладки.
++                        paste_mode = cfg.get("paste_mode", "cmdv")  # "cmdv" (мгновенно) | "type" (посимвольно)
 +                        try:
-+                            from pynput.keyboard import Controller as _KbCtl
-+                            _KbCtl().type(text_to_paste)
++                            from pynput.keyboard import Controller as _KbCtl, Key as _Key
++                            kb = _KbCtl()
++                            if paste_mode == "type":
++                                time.sleep(0.05)
++                                kb.type(text_to_paste)
++                            else:
++                                # Авто Cmd+V целиком (мгновенно при любой длине).
++                                # Снимаем «залипшие» модификаторы (тык-стоп мог оставить
++                                # Option нажатым) и даём фокусу/отпусканию устаканиться —
++                                # иначе одиночное Cmd+V улетало в никуда (печать «прощала»
++                                # потерю части событий, Cmd+V — всё-или-ничего).
++                                for _k in (_Key.alt, _Key.alt_l, _Key.alt_r):
++                                    try: kb.release(_k)
++                                    except Exception: pass
++                                time.sleep(0.18)
++                                kb.press(_Key.cmd); time.sleep(0.012)
++                                kb.press("v"); time.sleep(0.012)
++                                kb.release("v"); kb.release(_Key.cmd)
 +                        except Exception as e:
-+                            logging.error(f"прямая печать не удалась: {e}; текст в буфере — вставь Cmd+V")
++                            logging.error(f"вставка не удалась: {e}; текст в буфере — вставь Cmd+V")
                      state.last_dictation_at = now
              except Exception as e:
                  print(f"❌ Transcription failed: {e}")
-@@ -1088,8 +1139,27 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1058,6 +1123,25 @@ def main_loop(cfg: dict, cfg_path: Path):
+         else:
+             start_recording()
+ 
++    # Внешний триггер записи из меню-бара: контроллер «трогает» файл-триггер,
++    # мы это замечаем и переключаем запись (как нажатие хоткея). Работает в
++    # любом режиме; сигналы/main-thread тут ненадёжны (listener.join блокирует).
++    def _watch_external_toggle():
++        trig = os.path.expanduser("~/.config/whisper-skill/toggle.trigger")
++        last = os.path.getmtime(trig) if os.path.exists(trig) else None
++        while True:
++            try:
++                m = os.path.getmtime(trig) if os.path.exists(trig) else last
++            except OSError:
++                m = last
++            if last is not None and m != last:
++                last = m
++                toggle()
++            elif last is None and m is not None:
++                last = m
++            time.sleep(0.3)
++    threading.Thread(target=_watch_external_toggle, daemon=True).start()
++
+     hotkey_str = cfg["hotkey"]
+     print(f"🎤 Whisper Voice Dictation активна")
+     print(f"   Хоткей: {hotkey_str} ({cfg['mode']})")
+@@ -1088,8 +1172,27 @@ def main_loop(cfg: dict, cfg_path: Path):
              except KeyboardInterrupt:
                  pass
      else:
@@ -178,7 +218,7 @@ index ab996a3..473150d 100644
              try:
                  listener.join()
              except KeyboardInterrupt:
-@@ -1115,13 +1185,10 @@ def _canonical_key(key) -> str:
+@@ -1115,13 +1218,10 @@ def _canonical_key(key) -> str:
      """Канонизирует key из pynput в строку, совпадающую с _parse_hotkey."""
      from pynput.keyboard import Key, KeyCode
      if isinstance(key, Key):
