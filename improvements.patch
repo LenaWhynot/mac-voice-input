@@ -1,5 +1,5 @@
 diff --git a/examples/voice_dictation.py b/examples/voice_dictation.py
-index ab996a3..e9db089 100644
+index ab996a3..30af3ef 100644
 --- a/examples/voice_dictation.py
 +++ b/examples/voice_dictation.py
 @@ -517,20 +517,28 @@ def paste_from_clipboard() -> None:
@@ -138,7 +138,7 @@ index ab996a3..e9db089 100644
  
          def work():
              try:
-@@ -1015,6 +1082,16 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1015,38 +1082,101 @@ def main_loop(cfg: dict, cfg_path: Path):
                  text = result.text.strip()
                  elapsed = time.time() - t0
  
@@ -155,7 +155,20 @@ index ab996a3..e9db089 100644
                  if not text:
                      print("⏭  Empty transcription")
                  else:
-@@ -1022,31 +1099,71 @@ def main_loop(cfg: dict, cfg_path: Path):
+                     print(f"✓ ({elapsed:.1f}s) → {text}")
++                    # Страховка от потери текста: сохраняем ПОСЛЕДНЮЮ диктовку
++                    # (для кнопки «Скопировать последнюю» в меню-баре) + полную
++                    # историю. Буфер обмена НЕ трогаем — если вставка промахнулась
++                    # мимо поля, текст достаётся из меню-бара по требованию.
++                    try:
++                        _cfgdir = Path.home() / ".config" / "whisper-skill"
++                        _cfgdir.mkdir(parents=True, exist_ok=True)
++                        (_cfgdir / "last_dictation.txt").write_text(text, encoding="utf-8")
++                        from datetime import datetime as _dtn
++                        with open(_cfgdir / "dictation-history.txt", "a", encoding="utf-8") as _hf:
++                            _hf.write(f"[{_dtn.now().isoformat(timespec='seconds')}] {text}\n")
++                    except Exception as _e:
++                        logging.warning(f"не удалось сохранить историю диктовки: {_e}")
                      # Если предыдущая диктовка была недавно — начинаем
                      # новую с переноса строки. Порог 30s — «продолжаем
                      # в то же место»; после большой паузы вставка чистая.
@@ -243,7 +256,7 @@ index ab996a3..e9db089 100644
                  try: os.unlink(wav_path)
                  except: pass
  
-@@ -1058,6 +1175,25 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1058,6 +1188,25 @@ def main_loop(cfg: dict, cfg_path: Path):
          else:
              start_recording()
  
@@ -269,7 +282,7 @@ index ab996a3..e9db089 100644
      hotkey_str = cfg["hotkey"]
      print(f"🎤 Whisper Voice Dictation активна")
      print(f"   Хоткей: {hotkey_str} ({cfg['mode']})")
-@@ -1074,12 +1210,14 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1074,12 +1223,14 @@ def main_loop(cfg: dict, cfg_path: Path):
          def on_press(key):
              currently_pressed.add(_canonical_key(key))
              if keys_needed.issubset(currently_pressed):
@@ -286,7 +299,7 @@ index ab996a3..e9db089 100644
              currently_pressed.discard(ck)
  
          with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-@@ -1088,8 +1226,36 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1088,8 +1239,36 @@ def main_loop(cfg: dict, cfg_path: Path):
              except KeyboardInterrupt:
                  pass
      else:
@@ -325,7 +338,7 @@ index ab996a3..e9db089 100644
              try:
                  listener.join()
              except KeyboardInterrupt:
-@@ -1115,13 +1281,10 @@ def _canonical_key(key) -> str:
+@@ -1115,13 +1294,10 @@ def _canonical_key(key) -> str:
      """Канонизирует key из pynput в строку, совпадающую с _parse_hotkey."""
      from pynput.keyboard import Key, KeyCode
      if isinstance(key, Key):
