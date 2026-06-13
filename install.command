@@ -1,6 +1,6 @@
 #!/bin/bash
 # ──────────────────────────────────────────────────────────────────────
-#  Голосовая диктовка на Mac — локальный Whisper. Бесплатно, без облака.
+#  Голосовой ввод на Mac — локальный Whisper. Бесплатно, без облака.
 #  Для Apple Silicon (M1/M2/M3/M4).
 #
 #  Этот установщик САМ скачивает оригинальный движок Whisper-Skill
@@ -23,7 +23,7 @@ say(){ printf "\n\033[1m%s\033[0m\n" "$1"; }
 ok(){ printf "  \033[32m✓\033[0m %s\n" "$1"; }
 warn(){ printf "  \033[33m⚠\033[0m %s\n" "$1"; }
 
-say "🎤 Установка локальной голосовой диктовки (Whisper)"
+say "🎤 Установка локального голосового ввода (Whisper)"
 
 # 0. Только Apple Silicon
 [ "$(uname -m)" = "arm64" ] || { warn "Нужен Mac на Apple Silicon (M1/M2/M3/M4)."; read -r -p "Enter…" _; exit 1; }
@@ -128,9 +128,9 @@ echo "  Путь: $PYAPP"
 open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null || true
 sleep 2
 open "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent" 2>/dev/null || true
-say "После двух галочек диктовка заработает сама (перезапуск не нужен)."
+say "После двух галочек голосовой ввод заработает сам (перезапуск не нужен)."
 echo "  Пользоваться: тык ПРАВОГО Option → говоришь → ещё тык → текст печатается."
-echo "  Первая диктовка скачает модель (~1.6 ГБ). Из РФ HuggingFace может лимитировать —"
+echo "  Первый голосовой ввод скачает модель (~1.6 ГБ). Из РФ HuggingFace может лимитировать —"
 echo "  включи VPN на момент первого запуска или добавь бесплатный HF-токен."
 ok "Готово. Можно закрыть окно."
 read -r -p "Enter для выхода…" _
