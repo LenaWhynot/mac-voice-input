@@ -1,5 +1,5 @@
 diff --git a/examples/voice_dictation.py b/examples/voice_dictation.py
-index ab996a3..5de6bb4 100644
+index ab996a3..e9db089 100644
 --- a/examples/voice_dictation.py
 +++ b/examples/voice_dictation.py
 @@ -517,20 +517,28 @@ def paste_from_clipboard() -> None:
@@ -269,7 +269,24 @@ index ab996a3..5de6bb4 100644
      hotkey_str = cfg["hotkey"]
      print(f"🎤 Whisper Voice Dictation активна")
      print(f"   Хоткей: {hotkey_str} ({cfg['mode']})")
-@@ -1088,8 +1224,30 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1074,12 +1210,14 @@ def main_loop(cfg: dict, cfg_path: Path):
+         def on_press(key):
+             currently_pressed.add(_canonical_key(key))
+             if keys_needed.issubset(currently_pressed):
+-                start_recording()
++                # В отдельный поток: иначе колбэк event-tap подвисает на старте
++                # аудиопотока → macOS отключает тап по таймауту → клавиши теряются.
++                threading.Thread(target=start_recording, daemon=True).start()
+ 
+         def on_release(key):
+             ck = _canonical_key(key)
+             if ck in keys_needed and state.is_recording:
+-                stop_and_transcribe()
++                threading.Thread(target=stop_and_transcribe, daemon=True).start()
+             currently_pressed.discard(ck)
+ 
+         with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+@@ -1088,8 +1226,36 @@ def main_loop(cfg: dict, cfg_path: Path):
              except KeyboardInterrupt:
                  pass
      else:
@@ -293,7 +310,13 @@ index ab996a3..5de6bb4 100644
 +                now_t = time.time()
 +                if now_t - last_toggle[0] > 0.45:
 +                    last_toggle[0] = now_t
-+                    toggle()
++                    # КРИТИЧНО: toggle() уносим в отдельный поток, чтобы колбэк
++                    # event-tap возвращался мгновенно. Если делать старт/стоп
++                    # аудиопотока прямо здесь, под нагрузкой (идёт распознавание)
++                    # колбэк подвисает >1с → macOS ОТКЛЮЧАЕТ event-tap по таймауту,
++                    # и дальше нажатия правого Option вообще не доходят (запись
++                    # стартует, а тап на стоп теряется → «залипание», буфер пуст).
++                    threading.Thread(target=toggle, daemon=True).start()
 +
 +        def on_release(key):
 +            currently_pressed.discard(_canonical_key(key))
@@ -302,7 +325,7 @@ index ab996a3..5de6bb4 100644
              try:
                  listener.join()
              except KeyboardInterrupt:
-@@ -1115,13 +1273,10 @@ def _canonical_key(key) -> str:
+@@ -1115,13 +1281,10 @@ def _canonical_key(key) -> str:
      """Канонизирует key из pynput в строку, совпадающую с _parse_hotkey."""
      from pynput.keyboard import Key, KeyCode
      if isinstance(key, Key):
