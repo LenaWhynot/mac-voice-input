@@ -1,4 +1,4 @@
-import os, subprocess, time
+import os, sys, subprocess, time
 from pathlib import Path
 import rumps
 
@@ -8,7 +8,12 @@ PLIST = os.path.expanduser("~/Library/LaunchAgents/com.whisper.dictation.plist")
 TRIGGER = os.path.expanduser("~/.config/whisper-skill/toggle.trigger")
 LAST = os.path.expanduser("~/.config/whisper-skill/last_dictation.txt")
 HISTORY = os.path.expanduser("~/.config/whisper-skill/dictation-history.txt")
-_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "menubar_icon.png")
+_HERE = os.path.dirname(os.path.abspath(__file__))          # <DIR>/control
+_ICON = os.path.join(_HERE, "menubar_icon.png")
+VIEWER = os.path.join(_HERE, "history_viewer.py")
+# venv-питон рядом со скиллом (в нём есть tkinter); фолбэк — текущий интерпретатор
+_VENV_PY = os.path.join(os.path.dirname(_HERE), ".venv", "bin", "python")
+VIEWER_PY = _VENV_PY if os.path.exists(_VENV_PY) else sys.executable
 
 
 def _running():
@@ -65,10 +70,14 @@ class WhispeeControl(rumps.App):
 
     @rumps.clicked("Открыть историю диктовок")
     def openhistory(self, _):
-        if not os.path.exists(HISTORY):
+        # Нативное окно (Tkinter) с поиском и копированием по записи —
+        # не блокнот. Запускаем venv-питоном (в нём есть tkinter).
+        if os.path.exists(VIEWER):
+            subprocess.Popen([VIEWER_PY, VIEWER])
+        elif os.path.exists(HISTORY):
+            subprocess.run(["open", HISTORY])      # фолбэк: текстовый файл
+        else:
             rumps.notification("Whispee", "", "История пока пуста")
-            return
-        subprocess.run(["open", HISTORY])
 
     @rumps.clicked("Перезапустить")
     def restart(self, _):

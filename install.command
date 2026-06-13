@@ -34,12 +34,14 @@ ok "Apple Silicon"
 command -v brew >/dev/null 2>&1 || { warn "Нет Homebrew. Поставь с https://brew.sh и запусти снова."; read -r -p "Enter…" _; exit 1; }
 ok "Homebrew"
 
-say "Ставлю Python 3.13 и ffmpeg…"
+say "Ставлю Python 3.13, Tk и ffmpeg…"
 brew list python@3.13 >/dev/null 2>&1 || brew install python@3.13
+# python-tk@3.13 — для нативного окна «История диктовок» (Tkinter)
+brew list python-tk@3.13 >/dev/null 2>&1 || brew install python-tk@3.13 || warn "python-tk не поставился — окно истории недоступно, останется текстовый файл."
 command -v ffmpeg >/dev/null 2>&1 || brew install ffmpeg
 PY="$(brew --prefix python@3.13)/bin/python3.13"
 FFDIR="$(dirname "$(command -v ffmpeg)")"
-ok "Python 3.13 + ffmpeg ($FFDIR)"
+ok "Python 3.13 + Tk + ffmpeg ($FFDIR)"
 
 say "Скачиваю движок (оригинал) и накатываю улучшения…"
 [ -d "$DIR/examples" ] || git clone --depth 1 https://github.com/Mobiss11/Whisper-Skill "$DIR"
@@ -149,6 +151,7 @@ say "Иконка управления в меню-баре…"
 mkdir -p "$DIR/control"
 cp "$HERE/whispee_control.py" "$DIR/control/whispee_control.py"
 cp "$HERE/menubar_icon.png" "$DIR/control/menubar_icon.png"
+cp "$HERE/history_viewer.py" "$DIR/control/history_viewer.py"   # нативное окно истории
 cat > "$CTRL_PLIST" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -163,6 +166,21 @@ PLISTEOF
 launchctl bootout "gui/$UID_NUM/com.whispee.control" 2>/dev/null || true
 sleep 1; launchctl bootstrap "gui/$UID_NUM" "$CTRL_PLIST" 2>/dev/null || true
 ok "Меню-бар 🎤 настроен"
+
+say "Приложение «История диктовок» на рабочий стол…"
+HIST_APP="$HOME/Desktop/История диктовок.app"
+rm -rf "$HIST_APP"
+# applet запускает окно venv-питоном, detached (& → applet сразу выходит)
+if osacompile -o "$HIST_APP" -e "do shell script \"'$DIR/.venv/bin/python' '$DIR/control/history_viewer.py' > /dev/null 2>&1 &\"" 2>/dev/null; then
+  [ -f "$DIR/Whispee.icns" ] && cp "$DIR/Whispee.icns" "$HIST_APP/Contents/Resources/applet.icns"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile applet" "$HIST_APP/Contents/Info.plist" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string applet" "$HIST_APP/Contents/Info.plist" 2>/dev/null || true
+  touch "$HIST_APP"
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$HIST_APP" 2>/dev/null || true
+  ok "«История диктовок.app» на рабочем столе (двойной клик — окно с поиском и копированием)"
+else
+  warn "Не собрал приложение истории — открыть можно из меню-бара 🎤 → «Открыть историю диктовок»."
+fi
 
 # Разрешения
 PYAPP="$("$DIR/.venv/bin/python" - <<'PYEOF'
