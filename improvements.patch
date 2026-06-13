@@ -1,5 +1,5 @@
 diff --git a/examples/voice_dictation.py b/examples/voice_dictation.py
-index ab996a3..741c41c 100644
+index ab996a3..72737f7 100644
 --- a/examples/voice_dictation.py
 +++ b/examples/voice_dictation.py
 @@ -517,20 +517,28 @@ def paste_from_clipboard() -> None:
@@ -105,7 +105,7 @@ index ab996a3..741c41c 100644
          except Exception as e:
              print(f"❌ Recording failed: {e}")
              state.is_recording = False
-@@ -1022,23 +1065,45 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1022,23 +1065,57 @@ def main_loop(cfg: dict, cfg_path: Path):
                      # Если предыдущая диктовка была недавно — начинаем
                      # новую с переноса строки. Порог 30s — «продолжаем
                      # в то же место»; после большой паузы вставка чистая.
@@ -124,11 +124,7 @@ index ab996a3..741c41c 100644
                          text_to_paste = text
  
 -                    saved_clipboard = save_clipboard() if cfg.get("auto_paste") else None
-+                    # Кладём текст и в буфер (бэкап: если печать не сработает —
-+                    # вставишь вручную Cmd+V). Буфер НЕ восстанавливаем.
-+                    # Текст в буфер: и для мгновенной вставки Cmd+V, и как ручной
-+                    # фолбэк (если авто-вставка не сработает — Cmd+V руками).
-                     copy_to_clipboard(text_to_paste)
+-                    copy_to_clipboard(text_to_paste)
                      if cfg.get("auto_paste"):
 -                        time.sleep(0.25)  # дать целевому полю стать активным
 -                        paste_from_clipboard()
@@ -137,32 +133,49 @@ index ab996a3..741c41c 100644
 -                        # прочитать диктованный текст до того, как мы
 -                        # вернём оригинал.
 -                        restore_clipboard_deferred(saved_clipboard, delay_sec=1.0)
-+                        paste_mode = cfg.get("paste_mode", "cmdv")  # "cmdv" (мгновенно) | "type" (посимвольно)
-+                        try:
-+                            from pynput.keyboard import Controller as _KbCtl, Key as _Key
-+                            kb = _KbCtl()
-+                            if paste_mode == "type":
-+                                time.sleep(0.05)
-+                                kb.type(text_to_paste)
-+                            else:
-+                                # Авто Cmd+V целиком (мгновенно при любой длине).
-+                                # Снимаем «залипшие» модификаторы (тык-стоп мог оставить
-+                                # Option нажатым) и даём фокусу/отпусканию устаканиться —
-+                                # иначе одиночное Cmd+V улетало в никуда (печать «прощала»
-+                                # потерю части событий, Cmd+V — всё-или-ничего).
-+                                for _k in (_Key.alt, _Key.alt_l, _Key.alt_r):
-+                                    try: kb.release(_k)
-+                                    except Exception: pass
-+                                time.sleep(0.18)
-+                                kb.press(_Key.cmd); time.sleep(0.012)
-+                                kb.press("v"); time.sleep(0.012)
-+                                kb.release("v"); kb.release(_Key.cmd)
-+                        except Exception as e:
-+                            logging.error(f"вставка не удалась: {e}; текст в буфере — вставь Cmd+V")
++                        paste_mode = cfg.get("paste_mode", "uni")
++                        time.sleep(0.12)
++                        if paste_mode == "uni":
++                            # Quartz: вставляем юникод-строку напрямую одним событием.
++                            # Доходит до активного поля (как печать), НЕ зависит от
++                            # раскладки (символы заданы явно), мгновенно при любой длине.
++                            # ВАЖНО: буфер обмена НЕ трогаем — что юзер скопировал, то и
++                            # остаётся (можно вставить свою копию после диктовки).
++                            try:
++                                import Quartz
++                                _t = text_to_paste
++                                for _down in (True, False):
++                                    _ev = Quartz.CGEventCreateKeyboardEvent(None, 0, _down)
++                                    Quartz.CGEventKeyboardSetUnicodeString(_ev, len(_t), _t)
++                                    Quartz.CGEventPost(Quartz.kCGHIDEventTap, _ev)
++                            except Exception as e:
++                                # аварийный фолбэк: хотя бы положить в буфер (Cmd+V вручную)
++                                copy_to_clipboard(text_to_paste)
++                                logging.error(f"unicode-вставка не удалась: {e}; текст в буфере — Cmd+V")
++                        elif paste_mode == "osa":
++                            # Cmd+V из буфера: буфер занимаем временно и ВОЗВРАЩАЕМ
++                            # исходный, чтобы не затирать копию пользователя.
++                            _saved = save_clipboard()
++                            copy_to_clipboard(text_to_paste)
++                            try:
++                                subprocess.run(
++                                    ["osascript", "-e",
++                                     'tell application "System Events" to keystroke "v" using command down'],
++                                    check=True, timeout=3, capture_output=True)
++                            except Exception as e:
++                                logging.error(f"osascript-вставка не сработала: {e}; текст в буфере — Cmd+V")
++                            restore_clipboard_deferred(_saved, delay_sec=2.0)
++                        else:  # "type" — ⚠️ зависит от раскладки; буфер не трогаем
++                            try:
++                                from pynput.keyboard import Controller as _KbCtl
++                                _KbCtl().type(text_to_paste)
++                            except Exception as e:
++                                copy_to_clipboard(text_to_paste)
++                                logging.error(f"печать не удалась: {e}; текст в буфере — Cmd+V")
                      state.last_dictation_at = now
              except Exception as e:
                  print(f"❌ Transcription failed: {e}")
-@@ -1058,6 +1123,25 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1058,6 +1135,25 @@ def main_loop(cfg: dict, cfg_path: Path):
          else:
              start_recording()
  
@@ -188,37 +201,40 @@ index ab996a3..741c41c 100644
      hotkey_str = cfg["hotkey"]
      print(f"🎤 Whisper Voice Dictation активна")
      print(f"   Хоткей: {hotkey_str} ({cfg['mode']})")
-@@ -1088,8 +1172,27 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1088,8 +1184,30 @@ def main_loop(cfg: dict, cfg_path: Path):
              except KeyboardInterrupt:
                  pass
      else:
 -        # Toggle: нажал → старт, нажал ещё раз → стоп
 -        with keyboard.GlobalHotKeys({hotkey_str: toggle}) as listener:
 +        # Toggle на сыром Listener: тык = старт, ещё тык = стоп.
-+        # GlobalHotKeys у pynput капризен с одиночным модификатором (<alt_r>) —
-+        # делаем сами. combo_active гарантирует один toggle на одно нажатие
-+        # (а не на авто-повтор клавиши).
++        # ДЕБАУНС ПО НАЖАТИЮ (а не «нажал+отпустил»): переключаем запись на
++        # КАЖДОМ нажатии хоткея, отпускание вообще НЕ учитываем. Это лечит
++        # залипание: под нагрузкой (во время распознавания) pynput иногда терял
++        # событие отпускания — и старая логика «ждала» его, запись висла. Теперь
++        # потерянные отпускания не важны: следующий тык всегда переключит.
++        # debounce защищает от случайного двойного срабатывания/автоповтора.
 +        keys_needed = _parse_hotkey(hotkey_str)
 +        currently_pressed = set()
-+        combo_active = {"on": False}
++        last_toggle = [0.0]
 +
 +        def on_press(key):
-+            currently_pressed.add(_canonical_key(key))
-+            if keys_needed.issubset(currently_pressed) and not combo_active["on"]:
-+                combo_active["on"] = True
-+                toggle()
++            ck = _canonical_key(key)
++            currently_pressed.add(ck)
++            if ck in keys_needed and keys_needed.issubset(currently_pressed):
++                now_t = time.time()
++                if now_t - last_toggle[0] > 0.45:
++                    last_toggle[0] = now_t
++                    toggle()
 +
 +        def on_release(key):
-+            ck = _canonical_key(key)
-+            currently_pressed.discard(ck)
-+            if ck in keys_needed:
-+                combo_active["on"] = False
++            currently_pressed.discard(_canonical_key(key))
 +
 +        with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
              try:
                  listener.join()
              except KeyboardInterrupt:
-@@ -1115,13 +1218,10 @@ def _canonical_key(key) -> str:
+@@ -1115,13 +1233,10 @@ def _canonical_key(key) -> str:
      """Канонизирует key из pynput в строку, совпадающую с _parse_hotkey."""
      from pynput.keyboard import Key, KeyCode
      if isinstance(key, Key):

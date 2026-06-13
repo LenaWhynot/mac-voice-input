@@ -73,7 +73,7 @@ cat > "$CFG_DIR/voice_dictation.json" <<JSON
   "language": "ru",
   "model": "$MODEL_DIR",
   "backend": "mlx",
-  "paste_mode": "type",
+  "paste_mode": "uni",
   "sample_rate": 16000,
   "channels": 1,
   "auto_paste": true,
@@ -87,7 +87,7 @@ cat > "$CFG_DIR/voice_dictation.json" <<JSON
   "warmup": false
 }
 JSON
-ok "Конфиг: правый Option (toggle), язык ru, turbo, авто-вставка печатью"
+ok "Конфиг: правый Option (toggle), язык ru, turbo, авто-вставка (юникод, не зависит от раскладки, буфер не трогает)"
 
 say "Собираю приложение «Whispee» с иконкой…"
 # иконка .icns из 1024 PNG
