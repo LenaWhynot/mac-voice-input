@@ -1,5 +1,5 @@
 diff --git a/examples/voice_dictation.py b/examples/voice_dictation.py
-index ab996a3..72737f7 100644
+index ab996a3..5de6bb4 100644
 --- a/examples/voice_dictation.py
 +++ b/examples/voice_dictation.py
 @@ -517,20 +517,28 @@ def paste_from_clipboard() -> None:
@@ -69,15 +69,16 @@ index ab996a3..72737f7 100644
      if _BEEP_WAV_STOP is not None:
          _play_wav_bytes(_BEEP_WAV_STOP)
  
-@@ -849,6 +877,7 @@ class State:
+@@ -849,6 +877,8 @@ class State:
      is_recording: bool = False
      is_transcribing: bool = False
      last_dictation_at: float = 0.0  # time.time() последней успешной вставки
 +    record_seq: int = 0  # номер текущей записи (для watchdog авто-стопа)
++    transcribe_seq: int = 0  # номер текущей транскрипции (для watchdog авто-сброса)
  
  
  def main_loop(cfg: dict, cfg_path: Path):
-@@ -947,6 +976,8 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -947,6 +977,8 @@ def main_loop(cfg: dict, cfg_path: Path):
              if state.is_recording or state.is_transcribing:
                  return
              state.is_recording = True
@@ -86,7 +87,7 @@ index ab996a3..72737f7 100644
          tray.set_state("recording")
          if cursor_ind:
              cursor_ind.show()
-@@ -955,6 +986,18 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -955,6 +987,18 @@ def main_loop(cfg: dict, cfg_path: Path):
          try:
              recorder.start()
              print("🎙  Recording... (release hotkey to transcribe)")
@@ -105,7 +106,56 @@ index ab996a3..72737f7 100644
          except Exception as e:
              print(f"❌ Recording failed: {e}")
              state.is_recording = False
-@@ -1022,23 +1065,57 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -997,7 +1041,30 @@ def main_loop(cfg: dict, cfg_path: Path):
+             return
+ 
+         print(f"⏳ Transcribing {duration_ms:.0f}ms of audio...")
+-        state.is_transcribing = True
++        with state_lock:
++            state.is_transcribing = True
++            state.transcribe_seq += 1
++            my_t_seq = state.transcribe_seq
++
++        # Watchdog транскрипции: если transcribe() завис (перезагрузка модели,
++        # сетевой чек HF, сбой mlx), is_transcribing навсегда True → start_recording
++        # блокируется и хоткей «залипает» (тык — и ничего). Авто-сброс по таймауту
++        # разлочивает движок; бамп seq помечает зависший work() как протухший,
++        # чтобы он не вставил устаревший текст в новое поле.
++        def _transcribe_watchdog():
++            time.sleep(cfg.get("transcribe_timeout_sec", 30))
++            with state_lock:
++                stuck = state.is_transcribing and state.transcribe_seq == my_t_seq
++                if stuck:
++                    state.is_transcribing = False
++                    state.transcribe_seq += 1
++            if stuck:
++                logging.warning("авто-сброс зависшей транскрипции по таймауту — движок разлочен")
++                print("⚠️  Транскрипция зависла — авто-сброс, можно говорить снова")
++                tray.set_state("idle")
++                if cursor_ind:
++                    cursor_ind.hide()
++        threading.Thread(target=_transcribe_watchdog, daemon=True).start()
+ 
+         def work():
+             try:
+@@ -1015,6 +1082,16 @@ def main_loop(cfg: dict, cfg_path: Path):
+                 text = result.text.strip()
+                 elapsed = time.time() - t0
+ 
++                # Если watchdog уже признал эту транскрипцию зависшей (seq
++                # сдвинулся), не вставляем устаревший текст — он улетел бы в
++                # другое поле/новую запись.
++                with state_lock:
++                    stale = state.transcribe_seq != my_t_seq
++                if stale:
++                    if text:
++                        print(f"⏭  Поздняя транскрипция отброшена (таймаут) → {text}")
++                    return
++
+                 if not text:
+                     print("⏭  Empty transcription")
+                 else:
+@@ -1022,31 +1099,71 @@ def main_loop(cfg: dict, cfg_path: Path):
                      # Если предыдущая диктовка была недавно — начинаем
                      # новую с переноса строки. Порог 30s — «продолжаем
                      # в то же место»; после большой паузы вставка чистая.
@@ -175,7 +225,25 @@ index ab996a3..72737f7 100644
                      state.last_dictation_at = now
              except Exception as e:
                  print(f"❌ Transcription failed: {e}")
-@@ -1058,6 +1135,25 @@ def main_loop(cfg: dict, cfg_path: Path):
+             finally:
+-                state.is_transcribing = False
+-                tray.set_state("idle")
+-                if cursor_ind:
+-                    cursor_ind.hide()
++                # Сбрасываем флаг только если watchdog нас не опередил — иначе
++                # затрём состояние уже стартовавшей новой записи.
++                with state_lock:
++                    mine = state.transcribe_seq == my_t_seq
++                    if mine:
++                        state.is_transcribing = False
++                if mine:
++                    tray.set_state("idle")
++                    if cursor_ind:
++                        cursor_ind.hide()
+                 try: os.unlink(wav_path)
+                 except: pass
+ 
+@@ -1058,6 +1175,25 @@ def main_loop(cfg: dict, cfg_path: Path):
          else:
              start_recording()
  
@@ -201,7 +269,7 @@ index ab996a3..72737f7 100644
      hotkey_str = cfg["hotkey"]
      print(f"🎤 Whisper Voice Dictation активна")
      print(f"   Хоткей: {hotkey_str} ({cfg['mode']})")
-@@ -1088,8 +1184,30 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1088,8 +1224,30 @@ def main_loop(cfg: dict, cfg_path: Path):
              except KeyboardInterrupt:
                  pass
      else:
@@ -234,7 +302,7 @@ index ab996a3..72737f7 100644
              try:
                  listener.join()
              except KeyboardInterrupt:
-@@ -1115,13 +1233,10 @@ def _canonical_key(key) -> str:
+@@ -1115,13 +1273,10 @@ def _canonical_key(key) -> str:
      """Канонизирует key из pynput в строку, совпадающую с _parse_hotkey."""
      from pynput.keyboard import Key, KeyCode
      if isinstance(key, Key):

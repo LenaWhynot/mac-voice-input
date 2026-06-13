@@ -33,7 +33,7 @@
 
 ## Что внутри
 
-- Движок: **[Whisper-Skill](https://github.com/Mobiss11/Whisper-Skill)** (автор [@Mobiss11](https://github.com/Mobiss11), все права на движок — у автора). Установщик скачивает его напрямую у автора и накатывает улучшения под macOS (`improvements.patch`): toggle по правому Option, авто-вставка, звуки, авто-стоп, запуск из меню-бара.
+- Движок: **[Whisper-Skill](https://github.com/Mobiss11/Whisper-Skill)** (автор [@Mobiss11](https://github.com/Mobiss11), все права на движок — у автора). Установщик скачивает его напрямую у автора и накатывает улучшения под macOS (`improvements.patch`): toggle по правому Option, авто-вставка, звуки, авто-стоп, авто-сброс зависшей транскрипции, запуск из меню-бара.
 - Модель: **large-v3-turbo** (Apple Metal, ~0.3–0.5с на фразу). Скачивается с **ModelScope** — без лимитов HuggingFace, поэтому работает и из России без VPN.
 - Приложение **Whispee.app** с иконкой (имя и логотип в системе, а не «Python»).
 
