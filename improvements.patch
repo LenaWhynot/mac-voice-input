@@ -1,0 +1,198 @@
+diff --git a/examples/voice_dictation.py b/examples/voice_dictation.py
+index ab996a3..473150d 100644
+--- a/examples/voice_dictation.py
++++ b/examples/voice_dictation.py
+@@ -517,20 +517,28 @@ def paste_from_clipboard() -> None:
+ 
+     На Linux/Windows используется pynput напрямую.
+     """
+-    # macOS: предпочитаем osascript (надёжнее с защитой Accessibility)
++    # macOS: pynput Cmd+V — ОСНОВНОЙ путь (Accessibility выдан). osascript через
++    # System Events на этом маке стабильно таймаутит ~0.6с и тормозит вставку,
++    # поэтому он теперь только запасной.
+     if platform.system() == "Darwin":
++        try:
++            from pynput.keyboard import Controller, Key
++            kb = Controller()
++            with kb.pressed(Key.cmd):
++                kb.press("v")
++                kb.release("v")
++            return
++        except Exception as e:
++            logging.warning(f"pynput paste failed: {e}, trying osascript fallback")
+         try:
+             subprocess.run(
+                 ["osascript", "-e",
+                  'tell application "System Events" to keystroke "v" using command down'],
+-                check=True, capture_output=True, timeout=2,
++                check=True, capture_output=True, timeout=0.6,
+             )
+             return
+-        except subprocess.CalledProcessError as e:
+-            stderr = (e.stderr or b"").decode(errors="replace")
+-            logging.warning(f"osascript paste failed ({stderr.strip()}), trying pynput fallback")
+         except Exception as e:
+-            logging.warning(f"osascript paste failed: {e}, trying pynput fallback")
++            logging.warning(f"osascript paste failed: {e}")
+ 
+     # Fallback и основной путь для Linux/Windows
+     try:
+@@ -683,11 +691,31 @@ def _play_wav_bytes(wav: bytes) -> None:
+ 
+ 
+ def play_start_beep() -> None:
++    # macOS: системный звук через afplay — громко, чётко, не конфликтует с
++    # активным InputStream микрофона (в отличие от тихого sd.play на 0.01).
++    if platform.system() == "Darwin":
++        try:
++            subprocess.Popen(
++                ["afplay", "-v", "2", "/System/Library/Sounds/Purr.aiff"],
++                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
++            )
++            return
++        except Exception:
++            pass
+     if _BEEP_WAV_START is not None:
+         _play_wav_bytes(_BEEP_WAV_START)
+ 
+ 
+ def play_stop_beep() -> None:
++    if platform.system() == "Darwin":
++        try:
++            subprocess.Popen(
++                ["afplay", "-v", "2", "/System/Library/Sounds/Morse.aiff"],
++                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
++            )
++            return
++        except Exception:
++            pass
+     if _BEEP_WAV_STOP is not None:
+         _play_wav_bytes(_BEEP_WAV_STOP)
+ 
+@@ -849,6 +877,7 @@ class State:
+     is_recording: bool = False
+     is_transcribing: bool = False
+     last_dictation_at: float = 0.0  # time.time() последней успешной вставки
++    record_seq: int = 0  # номер текущей записи (для watchdog авто-стопа)
+ 
+ 
+ def main_loop(cfg: dict, cfg_path: Path):
+@@ -947,6 +976,8 @@ def main_loop(cfg: dict, cfg_path: Path):
+             if state.is_recording or state.is_transcribing:
+                 return
+             state.is_recording = True
++            state.record_seq += 1
++            my_seq = state.record_seq
+         tray.set_state("recording")
+         if cursor_ind:
+             cursor_ind.show()
+@@ -955,6 +986,18 @@ def main_loop(cfg: dict, cfg_path: Path):
+         try:
+             recorder.start()
+             print("🎙  Recording... (release hotkey to transcribe)")
++            # Watchdog: если отпускание клавиши потерялось, запись «висит»
++            # вечно и новые нажатия игнорируются. Авто-стоп по таймауту это
++            # лечит. my_seq защищает от гонки с новой записью.
++            max_sec = cfg.get("max_duration_sec", 60)
++            def _watchdog():
++                time.sleep(max_sec)
++                with state_lock:
++                    stuck = state.is_recording and state.record_seq == my_seq
++                if stuck:
++                    logging.warning(f"авто-стоп записи после {max_sec}s (потеряно отпускание клавиши?)")
++                    stop_and_transcribe()
++            threading.Thread(target=_watchdog, daemon=True).start()
+         except Exception as e:
+             print(f"❌ Recording failed: {e}")
+             state.is_recording = False
+@@ -1022,23 +1065,31 @@ def main_loop(cfg: dict, cfg_path: Path):
+                     # Если предыдущая диктовка была недавно — начинаем
+                     # новую с переноса строки. Порог 30s — «продолжаем
+                     # в то же место»; после большой паузы вставка чистая.
+-                    newline_threshold_s = cfg.get("newline_after_dictation_within_sec", 30.0)
++                    # При прямой печати '\n' = нажатие Enter → в чатах отправляет
++                    # сообщение. Поэтому продолжение склеиваем ПРОБЕЛОМ, не переносом
++                    # строки — чтобы можно было надиктовать одно длинное сообщение
++                    # частями и оно не улетало.
++                    cont_threshold_s = cfg.get("space_after_dictation_within_sec", 30.0)
+                     now = time.time()
+-                    if state.last_dictation_at and (now - state.last_dictation_at) < newline_threshold_s:
+-                        text_to_paste = "\n" + text
++                    if state.last_dictation_at and (now - state.last_dictation_at) < cont_threshold_s:
++                        text_to_paste = " " + text
+                     else:
+                         text_to_paste = text
+ 
+-                    saved_clipboard = save_clipboard() if cfg.get("auto_paste") else None
++                    # Кладём текст и в буфер (бэкап: если печать не сработает —
++                    # вставишь вручную Cmd+V). Буфер НЕ восстанавливаем.
+                     copy_to_clipboard(text_to_paste)
+                     if cfg.get("auto_paste"):
+-                        time.sleep(0.25)  # дать целевому полю стать активным
+-                        paste_from_clipboard()
+-                        # Восстанавливаем буфер асинхронно через 1с —
+-                        # таргет должен успеть обработать WM_PASTE и
+-                        # прочитать диктованный текст до того, как мы
+-                        # вернём оригинал.
+-                        restore_clipboard_deferred(saved_clipboard, delay_sec=1.0)
++                        time.sleep(0.2)  # дать целевому полю стать активным после тыка
++                        # Прямая печать через pynput — надёжнее Cmd+V/osascript
++                        # на этом маке (osascript keystroke = "not allowed/timeout",
++                        # вставка через буфер не срабатывала). type() шлёт unicode
++                        # напрямую, работает с кириллицей независимо от раскладки.
++                        try:
++                            from pynput.keyboard import Controller as _KbCtl
++                            _KbCtl().type(text_to_paste)
++                        except Exception as e:
++                            logging.error(f"прямая печать не удалась: {e}; текст в буфере — вставь Cmd+V")
+                     state.last_dictation_at = now
+             except Exception as e:
+                 print(f"❌ Transcription failed: {e}")
+@@ -1088,8 +1139,27 @@ def main_loop(cfg: dict, cfg_path: Path):
+             except KeyboardInterrupt:
+                 pass
+     else:
+-        # Toggle: нажал → старт, нажал ещё раз → стоп
+-        with keyboard.GlobalHotKeys({hotkey_str: toggle}) as listener:
++        # Toggle на сыром Listener: тык = старт, ещё тык = стоп.
++        # GlobalHotKeys у pynput капризен с одиночным модификатором (<alt_r>) —
++        # делаем сами. combo_active гарантирует один toggle на одно нажатие
++        # (а не на авто-повтор клавиши).
++        keys_needed = _parse_hotkey(hotkey_str)
++        currently_pressed = set()
++        combo_active = {"on": False}
++
++        def on_press(key):
++            currently_pressed.add(_canonical_key(key))
++            if keys_needed.issubset(currently_pressed) and not combo_active["on"]:
++                combo_active["on"] = True
++                toggle()
++
++        def on_release(key):
++            ck = _canonical_key(key)
++            currently_pressed.discard(ck)
++            if ck in keys_needed:
++                combo_active["on"] = False
++
++        with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+             try:
+                 listener.join()
+             except KeyboardInterrupt:
+@@ -1115,13 +1185,10 @@ def _canonical_key(key) -> str:
+     """Канонизирует key из pynput в строку, совпадающую с _parse_hotkey."""
+     from pynput.keyboard import Key, KeyCode
+     if isinstance(key, Key):
+-        # Key.ctrl_l, Key.shift_r → "ctrl", "shift"
+-        name = key.name
+-        # Убрать суффиксы _l/_r
+-        for suffix in ("_l", "_r"):
+-            if name.endswith(suffix):
+-                name = name[:-2]
+-        return name
++        # Сохраняем сторону (alt_r / ctrl_l): иначе хоткей <alt_r> (правый
++        # Option) никогда не совпадёт — pynput на macOS шлёт правый Option как
++        # Key.alt_r, а срезание суффикса превращало его в "alt".
++        return key.name
+     if isinstance(key, KeyCode):
+         if key.char:
+             return key.char.lower()
