@@ -6,14 +6,88 @@
 сгруппированными по дню. Кнопка у каждой записи кладёт текст в буфер через
 pbcopy (Tk-буфер очищается при закрытии окна, pbcopy — нет).
 """
+import atexit
 import os
 import re
 import subprocess
+import time
 import tkinter as tk
 from tkinter import ttk
 from tkinter import font as tkfont
 
-HISTORY = os.path.expanduser("~/.config/whisper-skill/dictation-history.txt")
+CFG_DIR = os.path.expanduser("~/.config/whisper-skill")
+HISTORY = os.path.join(CFG_DIR, "dictation-history.txt")
+# Single-instance: один замок с PID + файл-сигнал «подними окно».
+# Вторая копия не плодит новое окно — будит уже открытое и выходит.
+LOCK = os.path.join(CFG_DIR, "history_viewer.lock")
+RAISE = os.path.join(CFG_DIR, "history_viewer.raise")
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _existing_instance():
+    """PID уже открытой живой копии, иначе None."""
+    try:
+        with open(LOCK) as f:
+            pid = int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+    return pid if pid != os.getpid() and _pid_alive(pid) else None
+
+
+def _release_lock():
+    try:
+        with open(LOCK) as f:
+            if int(f.read().strip()) == os.getpid():
+                os.remove(LOCK)
+    except Exception:
+        pass
+
+
+# Иконка Whispee (микрофон на фиолетовом) — стабильная копия в assets, не /tmp.
+# ⚠️ НЕ assets/icon.png — это курсор-индикатор (стрелка), а не логотип.
+_SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ICON_PATH = os.path.join(_SKILL_DIR, "assets", "whispee_icon.png")
+
+
+def _set_macos_identity():
+    """Имя приложения в доке/меню = «Whispee» вместо «Python».
+
+    Должно отработать ДО инициализации NSApplication (до tk.Tk()): правим
+    in-memory Info-словарь голого интерпретатора — известный трюк для
+    Tkinter/pygame-приложений без бандла.
+    """
+    try:
+        from Foundation import NSBundle
+        b = NSBundle.mainBundle()
+        info = b.localizedInfoDictionary() or b.infoDictionary()
+        if info is not None:
+            info["CFBundleName"] = "Whispee"
+            info["CFBundleDisplayName"] = "Whispee"
+    except Exception:
+        pass
+
+
+def _set_dock_icon():
+    """Иконка Whispee в доке (NSApplication уже поднят Tk'ом)."""
+    try:
+        from AppKit import NSApplication, NSImage
+        if os.path.exists(ICON_PATH):
+            img = NSImage.alloc().initWithContentsOfFile_(ICON_PATH)
+            if img is not None:
+                NSApplication.sharedApplication().setApplicationIconImage_(img)
+    except Exception:
+        pass
 LINE_RE = re.compile(r"^\[(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):\d{2}\]\s?(.*)$")
 MONTHS = ["", "января", "февраля", "марта", "апреля", "мая", "июня",
           "июля", "августа", "сентября", "октября", "ноября", "декабря"]
@@ -34,8 +108,10 @@ OK_GREEN = "#16a34a"
 PLACEHOLDER = "🔍   Поиск по тексту…"
 
 
+MAX_ENTRIES = 150  # показываем последних N записей — больше = Tkinter тормозит
+
 def load_entries():
-    """→ list of (date_tuple(y,m,d), 'HH:MM', text), новые первыми."""
+    """→ list of (date_tuple(y,m,d), 'HH:MM', text), новые первыми (max MAX_ENTRIES)."""
     if not os.path.exists(HISTORY):
         return []
     out = []
@@ -49,7 +125,7 @@ def load_entries():
             if text.strip():
                 out.append(((int(y), int(mo), int(d)), f"{hh}:{mm}", text))
     out.reverse()
-    return out
+    return out[:MAX_ENTRIES]
 
 
 def day_label(dt):
@@ -139,7 +215,10 @@ class HistoryApp:
         root.bind("<Command-f>", lambda _: (self.ent.focus_set(), "break"))
 
         self.query.trace_add("write", lambda *_: self.render())
-        self.render()
+        # Defer первый рендер: окно появляется мгновенно, карточки отрисовываются
+        # после того как RunLoop установится. Без этого 247 виджетов создаются
+        # синхронно → CoreAnimation спин → 100% CPU при открытии.
+        root.after(50, self.render)
 
     # ── placeholder для поля поиска ──
     def _placeholder(self, ent, text):
@@ -261,12 +340,62 @@ class HistoryApp:
 
 
 def main():
+    os.makedirs(CFG_DIR, exist_ok=True)
+    _set_macos_identity()   # «Whispee» вместо «Python» — до создания окна
+
+    # Уже открыто другое окно? Не плодим новое — будим его и выходим.
+    if _existing_instance():
+        try:
+            with open(RAISE, "w") as f:
+                f.write(str(time.time()))
+        except Exception:
+            pass
+        return
+
+    try:
+        with open(LOCK, "w") as f:
+            f.write(str(os.getpid()))
+        atexit.register(_release_lock)
+    except Exception:
+        pass
+
     root = tk.Tk()
     try:
         root.tk.call("tk", "scaling", 2.0)
     except Exception:
         pass
+    _set_dock_icon()        # иконка Whispee в доке
     app = HistoryApp(root)
+
+    # Слушаем сигнал от второй копии: меняется mtime RAISE → поднять окно.
+    last_raise = [os.path.getmtime(RAISE) if os.path.exists(RAISE) else 0.0]
+
+    def _bring_to_front():
+        try:
+            root.deiconify()
+            root.lift()
+            root.attributes("-topmost", True)
+            root.after(350, lambda: root.attributes("-topmost", False))
+            root.focus_force()
+            subprocess.run(
+                ["osascript", "-e",
+                 f'tell application "System Events" to set frontmost of '
+                 f'(first process whose unix id is {os.getpid()}) to true'],
+                capture_output=True)
+        except Exception:
+            pass
+
+    def _poll_raise():
+        try:
+            m = os.path.getmtime(RAISE) if os.path.exists(RAISE) else 0.0
+            if m != last_raise[0]:
+                last_raise[0] = m
+                _bring_to_front()
+        except Exception:
+            pass
+        root.after(400, _poll_raise)
+
+    root.after(400, _poll_raise)
     # перевёрстка wraplength при ресайзе окна
     def on_resize(_):
         if app._fit_after:

@@ -66,8 +66,12 @@ if [ ! -s "$MODEL_DIR/weights.safetensors" ]; then
 fi
 if [ -s "$MODEL_DIR/weights.safetensors" ]; then ok "Модель скачана ($MODEL_DIR)"; else warn "Модель не докачалась — при первом вводе попробует HuggingFace."; fi
 
-say "Пишу конфиг…"
+say "Пишу конфиг и звуки…"
 mkdir -p "$CFG_DIR"
+# Усиленный Purr — стандартный звук старта записи (оригинал слишком тих)
+ffmpeg -y -i /System/Library/Sounds/Purr.aiff \
+  -af "volume=8dB,alimiter=limit=0.95" \
+  "$CFG_DIR/purr_loud.aiff" -loglevel quiet && ok "Звук старта записи готов" || warn "Не удалось создать звук — будет тихий оригинал"
 cat > "$CFG_DIR/voice_dictation.json" <<JSON
 {
   "hotkey": "<alt_r>",

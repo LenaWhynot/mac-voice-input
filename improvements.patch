@@ -1,5 +1,5 @@
 diff --git a/examples/voice_dictation.py b/examples/voice_dictation.py
-index ab996a3..30af3ef 100644
+index ab996a3..238c8f6 100644
 --- a/examples/voice_dictation.py
 +++ b/examples/voice_dictation.py
 @@ -517,20 +517,28 @@ def paste_from_clipboard() -> None:
@@ -37,7 +37,7 @@ index ab996a3..30af3ef 100644
  
      # Fallback и основной путь для Linux/Windows
      try:
-@@ -683,11 +691,31 @@ def _play_wav_bytes(wav: bytes) -> None:
+@@ -683,11 +691,32 @@ def _play_wav_bytes(wav: bytes) -> None:
  
  
  def play_start_beep() -> None:
@@ -46,7 +46,8 @@ index ab996a3..30af3ef 100644
 +    if platform.system() == "Darwin":
 +        try:
 +            subprocess.Popen(
-+                ["afplay", "-v", "2", "/System/Library/Sounds/Purr.aiff"],
++                ["afplay", os.path.expanduser(
++                    "~/.config/whisper-skill/purr_loud.aiff")],
 +                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 +            )
 +            return
@@ -69,25 +70,27 @@ index ab996a3..30af3ef 100644
      if _BEEP_WAV_STOP is not None:
          _play_wav_bytes(_BEEP_WAV_STOP)
  
-@@ -849,6 +877,8 @@ class State:
+@@ -849,6 +878,9 @@ class State:
      is_recording: bool = False
      is_transcribing: bool = False
      last_dictation_at: float = 0.0  # time.time() последней успешной вставки
 +    record_seq: int = 0  # номер текущей записи (для watchdog авто-стопа)
 +    transcribe_seq: int = 0  # номер текущей транскрипции (для watchdog авто-сброса)
++    recording_started_at: float = 0.0  # когда стартовала текущая запись
  
  
  def main_loop(cfg: dict, cfg_path: Path):
-@@ -947,6 +977,8 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -947,6 +979,9 @@ def main_loop(cfg: dict, cfg_path: Path):
              if state.is_recording or state.is_transcribing:
                  return
              state.is_recording = True
++            state.recording_started_at = time.time()
 +            state.record_seq += 1
 +            my_seq = state.record_seq
          tray.set_state("recording")
          if cursor_ind:
              cursor_ind.show()
-@@ -955,6 +987,18 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -955,6 +990,18 @@ def main_loop(cfg: dict, cfg_path: Path):
          try:
              recorder.start()
              print("🎙  Recording... (release hotkey to transcribe)")
@@ -106,7 +109,7 @@ index ab996a3..30af3ef 100644
          except Exception as e:
              print(f"❌ Recording failed: {e}")
              state.is_recording = False
-@@ -997,7 +1041,30 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -997,7 +1044,30 @@ def main_loop(cfg: dict, cfg_path: Path):
              return
  
          print(f"⏳ Transcribing {duration_ms:.0f}ms of audio...")
@@ -138,7 +141,7 @@ index ab996a3..30af3ef 100644
  
          def work():
              try:
-@@ -1015,38 +1082,101 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1015,38 +1085,101 @@ def main_loop(cfg: dict, cfg_path: Path):
                  text = result.text.strip()
                  elapsed = time.time() - t0
  
@@ -256,7 +259,7 @@ index ab996a3..30af3ef 100644
                  try: os.unlink(wav_path)
                  except: pass
  
-@@ -1058,6 +1188,25 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1058,6 +1191,38 @@ def main_loop(cfg: dict, cfg_path: Path):
          else:
              start_recording()
  
@@ -279,10 +282,23 @@ index ab996a3..30af3ef 100644
 +            time.sleep(0.3)
 +    threading.Thread(target=_watch_external_toggle, daemon=True).start()
 +
++    # Переживать отключение event-tap (иначе хоткей «умирает» до рестарта).
++    # on_reenable: если tap упал во время длинной записи (>12s) — stale press
++    # на стоп мог быть потерян. Авто-стопаем чтобы не висеть до watchdog'а 60s.
++    def _on_tap_reenable():
++        with state_lock:
++            recording = state.is_recording
++            duration = time.time() - state.recording_started_at if recording else 0
++        if recording and duration > 12:
++            logging.warning(
++                f"tap re-enabled после {duration:.0f}s записи — авто-стоп (потерян press стопа?)")
++            stop_and_transcribe()
++    _install_macos_tap_keepalive(on_reenable=_on_tap_reenable)
++
      hotkey_str = cfg["hotkey"]
      print(f"🎤 Whisper Voice Dictation активна")
      print(f"   Хоткей: {hotkey_str} ({cfg['mode']})")
-@@ -1074,12 +1223,14 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1074,12 +1239,14 @@ def main_loop(cfg: dict, cfg_path: Path):
          def on_press(key):
              currently_pressed.add(_canonical_key(key))
              if keys_needed.issubset(currently_pressed):
@@ -299,7 +315,7 @@ index ab996a3..30af3ef 100644
              currently_pressed.discard(ck)
  
          with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-@@ -1088,8 +1239,36 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1088,8 +1255,36 @@ def main_loop(cfg: dict, cfg_path: Path):
              except KeyboardInterrupt:
                  pass
      else:
@@ -338,7 +354,71 @@ index ab996a3..30af3ef 100644
              try:
                  listener.join()
              except KeyboardInterrupt:
-@@ -1115,13 +1294,10 @@ def _canonical_key(key) -> str:
+@@ -1099,6 +1294,63 @@ def main_loop(cfg: dict, cfg_path: Path):
+     return 0
+ 
+ 
++def _install_macos_tap_keepalive(on_reenable=None) -> None:
++    """macOS: переживать отключение глобального event-tap.
++
++    Корень «залипания» виспи: macOS гасит CGEventTap (timeout, если колбэк
++    подвис; или по флуду user-input; или после сна) и шлёт событие-маркер
++    kCGEventTapDisabledByTimeout / ...ByUserInput. Эта версия pynput его НЕ
++    переподнимает — listener жив, рунлуп крутится, но клавиши больше не доходят
++    → правый Option «мёртв» до перезапуска процесса.
++
++    Патчим darwin-backend: запоминаем хэндл тапа и в колбэке ловим disable-маркер
++    → CGEventTapEnable(tap, True). Тап оживает сам, без рестарта. Идемпотентно.
++
++    on_reenable: опциональный колбэк без аргументов, вызывается после успешного
++    переподнятия тапа (используется для авто-стопа зависших длинных записей).
++    """
++    if platform.system() != "Darwin":
++        return
++    try:
++        from pynput.keyboard import Listener as _KbL
++        from Quartz import CGEventTapEnable
++    except Exception as e:
++        logging.debug(f"tap-keepalive: backend недоступен ({e})")
++        return
++    if getattr(_KbL, "_tap_keepalive_patched", False):
++        return
++    # event_type у disable-маркеров: pyobjc отдаёт беззнаковые 0xFFFFFFFE/FF;
++    # на части версий приходят знаковые -2/-1 — покрываем оба варианта.
++    _DISABLED = {0xFFFFFFFE, 0xFFFFFFFF, -2, -1}
++    _orig_create = _KbL._create_event_tap
++    _orig_handler = _KbL._handler
++
++    def _create_event_tap(self):
++        tap = _orig_create(self)
++        self._ka_tap = tap          # сохраняем хэндл для повторного включения
++        return tap
++
++    def _handler(self, proxy, event_type, event, refcon):
++        if event_type in _DISABLED:
++            tap = getattr(self, "_ka_tap", None)
++            if tap is not None:
++                try:
++                    CGEventTapEnable(tap, True)
++                    logging.warning(
++                        "event-tap отключён macOS — переподнят (правый Option жив)")
++                    if on_reenable is not None:
++                        threading.Thread(target=on_reenable, daemon=True).start()
++                except Exception as e:
++                    logging.error(f"не удалось переподнять event-tap: {e}")
++            return event
++        return _orig_handler(self, proxy, event_type, event, refcon)
++
++    _KbL._create_event_tap = _create_event_tap
++    _KbL._handler = _handler
++    _KbL._tap_keepalive_patched = True
++    logging.info("tap-keepalive установлен: пережёвываем отключения event-tap")
++
++
+ def _parse_hotkey(s: str) -> set:
+     """'<ctrl>+<shift>+<space>' → set of canonical key names"""
+     parts = [p.strip().lower() for p in s.replace(" ", "").split("+")]
+@@ -1115,13 +1367,10 @@ def _canonical_key(key) -> str:
      """Канонизирует key из pynput в строку, совпадающую с _parse_hotkey."""
      from pynput.keyboard import Key, KeyCode
      if isinstance(key, Key):
