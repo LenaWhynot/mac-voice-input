@@ -1,8 +1,28 @@
 diff --git a/examples/voice_dictation.py b/examples/voice_dictation.py
-index ab996a3..238c8f6 100644
+index ab996a3..d00a666 100644
 --- a/examples/voice_dictation.py
 +++ b/examples/voice_dictation.py
-@@ -517,20 +517,28 @@ def paste_from_clipboard() -> None:
+@@ -275,11 +275,14 @@ class AudioRecorder:
+             return None
+         audio = np.concatenate(self._frames, axis=0)
+ 
+-        tmp = tempfile.NamedTemporaryFile(
+-            suffix=".wav", delete=False, prefix="voice_dictation_"
+-        )
+-        sf.write(tmp.name, audio, self.sample_rate, subtype="PCM_16")
+-        return tmp.name
++        # Сохраняем в стабильную папку (не /tmp) — переживает внезапный рестарт
++        # и позволяет восстановить аудио если транскрипция упала.
++        save_dir = Path.home() / ".config" / "whisper-skill" / "recordings"
++        save_dir.mkdir(parents=True, exist_ok=True)
++        from datetime import datetime as _dtn
++        wav_name = save_dir / f"rec_{_dtn.now().strftime('%Y%m%d_%H%M%S')}.wav"
++        sf.write(str(wav_name), audio, self.sample_rate, subtype="PCM_16")
++        return str(wav_name)
+ 
+     @property
+     def duration_sec(self) -> float:
+@@ -517,20 +520,28 @@ def paste_from_clipboard() -> None:
  
      На Linux/Windows используется pynput напрямую.
      """
@@ -37,7 +57,7 @@ index ab996a3..238c8f6 100644
  
      # Fallback и основной путь для Linux/Windows
      try:
-@@ -683,11 +691,32 @@ def _play_wav_bytes(wav: bytes) -> None:
+@@ -683,11 +694,32 @@ def _play_wav_bytes(wav: bytes) -> None:
  
  
  def play_start_beep() -> None:
@@ -70,7 +90,7 @@ index ab996a3..238c8f6 100644
      if _BEEP_WAV_STOP is not None:
          _play_wav_bytes(_BEEP_WAV_STOP)
  
-@@ -849,6 +878,9 @@ class State:
+@@ -849,11 +881,27 @@ class State:
      is_recording: bool = False
      is_transcribing: bool = False
      last_dictation_at: float = 0.0  # time.time() последней успешной вставки
@@ -80,7 +100,25 @@ index ab996a3..238c8f6 100644
  
  
  def main_loop(cfg: dict, cfg_path: Path):
-@@ -947,6 +979,9 @@ def main_loop(cfg: dict, cfg_path: Path):
+     from pynput import keyboard
+ 
++    # Чистим старые wav-записи из прошлых крашей (>1ч — точно не нужны)
++    try:
++        _rec_dir = Path.home() / ".config" / "whisper-skill" / "recordings"
++        if _rec_dir.exists():
++            _old = [f for f in _rec_dir.glob("rec_*.wav")
++                    if (time.time() - f.stat().st_mtime) > 3600]
++            for f in _old:
++                f.unlink(missing_ok=True)
++            if _old:
++                logging.info(f"очищено {len(_old)} старых записей из recordings/")
++    except Exception:
++        pass
++
+     # Lazy-import чтобы не падать на импортов при ошибке отсутствия пакетов
+     try:
+         from examples.common import transcribe
+@@ -947,6 +995,9 @@ def main_loop(cfg: dict, cfg_path: Path):
              if state.is_recording or state.is_transcribing:
                  return
              state.is_recording = True
@@ -90,7 +128,7 @@ index ab996a3..238c8f6 100644
          tray.set_state("recording")
          if cursor_ind:
              cursor_ind.show()
-@@ -955,6 +990,18 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -955,6 +1006,18 @@ def main_loop(cfg: dict, cfg_path: Path):
          try:
              recorder.start()
              print("🎙  Recording... (release hotkey to transcribe)")
@@ -109,7 +147,7 @@ index ab996a3..238c8f6 100644
          except Exception as e:
              print(f"❌ Recording failed: {e}")
              state.is_recording = False
-@@ -997,7 +1044,30 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -997,7 +1060,30 @@ def main_loop(cfg: dict, cfg_path: Path):
              return
  
          print(f"⏳ Transcribing {duration_ms:.0f}ms of audio...")
@@ -141,7 +179,7 @@ index ab996a3..238c8f6 100644
  
          def work():
              try:
-@@ -1015,38 +1085,101 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1015,38 +1101,101 @@ def main_loop(cfg: dict, cfg_path: Path):
                  text = result.text.strip()
                  elapsed = time.time() - t0
  
@@ -259,7 +297,7 @@ index ab996a3..238c8f6 100644
                  try: os.unlink(wav_path)
                  except: pass
  
-@@ -1058,6 +1191,38 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1058,6 +1207,76 @@ def main_loop(cfg: dict, cfg_path: Path):
          else:
              start_recording()
  
@@ -268,7 +306,13 @@ index ab996a3..238c8f6 100644
 +    # любом режиме; сигналы/main-thread тут ненадёжны (listener.join блокирует).
 +    def _watch_external_toggle():
 +        trig = os.path.expanduser("~/.config/whisper-skill/toggle.trigger")
-+        last = os.path.getmtime(trig) if os.path.exists(trig) else None
++        # Гарантируем существование файла до старта: иначе ПЕРВЫЙ touch из меню-бара
++        # трактуется как «файл появился» (инициализация), а не как срабатывание —
++        # и первая кнопка после свежего рестарта была бы холостой.
++        os.makedirs(os.path.dirname(trig), exist_ok=True)
++        if not os.path.exists(trig):
++            open(trig, "a").close()
++        last = os.path.getmtime(trig)
 +        while True:
 +            try:
 +                m = os.path.getmtime(trig) if os.path.exists(trig) else last
@@ -276,11 +320,43 @@ index ab996a3..238c8f6 100644
 +                m = last
 +            if last is not None and m != last:
 +                last = m
-+                toggle()
++                # В отдельный поток: stop_and_transcribe() закрывает аудиопоток,
++                # что под нагрузкой может подвиснуть >1с. Если звать toggle()
++                # прямо тут, watch-поток стопорится и СЛЕДУЮЩИЙ тык кнопки
++                # «Начать/остановить» из меню-бара уже не заметится. Поэтому
++                # кнопка меню-бара обязана оставаться живой всегда.
++                threading.Thread(target=toggle, daemon=True).start()
 +            elif last is None and m is not None:
 +                last = m
 +            time.sleep(0.3)
 +    threading.Thread(target=_watch_external_toggle, daemon=True).start()
++
++    # Принудительно ЗАВЕРШИТЬ текущую запись прямо сейчас (не ждать watchdog 60с)
++    # и расшифровать → last_dictation.txt. Меню-бар «Скопировать последнюю»
++    # дёргает этот триггер, чтобы восстановить ЗАСТРЯВШУЮ запись, когда стоп по
++    # хоткею не сработал (мёртвый event-tap/рун-луп). Путь полностью независим от
++    # хоткея — работает даже когда правый Option «мёртв», лишь бы жив процесс.
++    def _watch_finalize_trigger():
++        trig = os.path.expanduser("~/.config/whisper-skill/finalize.trigger")
++        os.makedirs(os.path.dirname(trig), exist_ok=True)
++        if not os.path.exists(trig):
++            open(trig, "a").close()
++        last = os.path.getmtime(trig)
++        while True:
++            try:
++                m = os.path.getmtime(trig) if os.path.exists(trig) else last
++            except OSError:
++                m = last
++            if last is not None and m != last:
++                last = m
++                if state.is_recording:
++                    logging.warning(
++                        "finalize-триггер: принудительный стоп+транскрипция текущей записи")
++                    threading.Thread(target=stop_and_transcribe, daemon=True).start()
++            elif last is None and m is not None:
++                last = m
++            time.sleep(0.3)
++    threading.Thread(target=_watch_finalize_trigger, daemon=True).start()
 +
 +    # Переживать отключение event-tap (иначе хоткей «умирает» до рестарта).
 +    # on_reenable: если tap упал во время длинной записи (>12s) — stale press
@@ -298,7 +374,7 @@ index ab996a3..238c8f6 100644
      hotkey_str = cfg["hotkey"]
      print(f"🎤 Whisper Voice Dictation активна")
      print(f"   Хоткей: {hotkey_str} ({cfg['mode']})")
-@@ -1074,12 +1239,14 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1074,12 +1293,14 @@ def main_loop(cfg: dict, cfg_path: Path):
          def on_press(key):
              currently_pressed.add(_canonical_key(key))
              if keys_needed.issubset(currently_pressed):
@@ -315,7 +391,7 @@ index ab996a3..238c8f6 100644
              currently_pressed.discard(ck)
  
          with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-@@ -1088,8 +1255,36 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1088,8 +1309,36 @@ def main_loop(cfg: dict, cfg_path: Path):
              except KeyboardInterrupt:
                  pass
      else:
@@ -354,7 +430,7 @@ index ab996a3..238c8f6 100644
              try:
                  listener.join()
              except KeyboardInterrupt:
-@@ -1099,6 +1294,63 @@ def main_loop(cfg: dict, cfg_path: Path):
+@@ -1099,6 +1348,104 @@ def main_loop(cfg: dict, cfg_path: Path):
      return 0
  
  
@@ -377,12 +453,15 @@ index ab996a3..238c8f6 100644
 +        return
 +    try:
 +        from pynput.keyboard import Listener as _KbL
-+        from Quartz import CGEventTapEnable
++        from Quartz import CGEventTapEnable, CGEventTapIsEnabled
 +    except Exception as e:
 +        logging.debug(f"tap-keepalive: backend недоступен ({e})")
 +        return
 +    if getattr(_KbL, "_tap_keepalive_patched", False):
 +        return
++    # Общий держатель хэндла тапа: и реактивный _handler, и активный поллер
++    # ниже переподнимают ОДИН и тот же тап. Заполняется в _create_event_tap.
++    _tap_holder = {"tap": None}
 +    # event_type у disable-маркеров: pyobjc отдаёт беззнаковые 0xFFFFFFFE/FF;
 +    # на части версий приходят знаковые -2/-1 — покрываем оба варианта.
 +    _DISABLED = {0xFFFFFFFE, 0xFFFFFFFF, -2, -1}
@@ -392,6 +471,7 @@ index ab996a3..238c8f6 100644
 +    def _create_event_tap(self):
 +        tap = _orig_create(self)
 +        self._ka_tap = tap          # сохраняем хэндл для повторного включения
++        _tap_holder["tap"] = tap    # и для активного поллера здоровья
 +        return tap
 +
 +    def _handler(self, proxy, event_type, event, refcon):
@@ -412,13 +492,50 @@ index ab996a3..238c8f6 100644
 +    _KbL._create_event_tap = _create_event_tap
 +    _KbL._handler = _handler
 +    _KbL._tap_keepalive_patched = True
-+    logging.info("tap-keepalive установлен: пережёвываем отключения event-tap")
++
++    # АКТИВНЫЙ поллер здоровья тапа — ГЛАВНОЕ лекарство от «залипания».
++    # Реактивный _handler выше оживляет тап только когда macOS присылает
++    # disable-маркер. Но после сна мака и «через несколько сессий» под нагрузкой
++    # macOS часто гасит CGEventTap МОЛЧА (без маркера) → _handler не вызывается,
++    # правый Option мёртв до перезапуска процесса. Поэтому сами раз в 3с
++    # спрашиваем CGEventTapIsEnabled и, если тап погашен, включаем обратно —
++    # без всякого маркера и без перезапуска. Хэндл тапа переживает сон (тот же
++    # процесс), поэтому CGEventTapEnable(True) его оживляет.
++    def _poll_tap_health():
++        prev_enabled = True
++        while True:
++            time.sleep(3)
++            tap = _tap_holder.get("tap")
++            if tap is None:
++                continue
++            try:
++                enabled = bool(CGEventTapIsEnabled(tap))
++            except Exception as e:
++                logging.debug(f"tap-poll: CGEventTapIsEnabled упал ({e})")
++                continue
++            if not enabled:
++                try:
++                    CGEventTapEnable(tap, True)
++                    logging.warning(
++                        "event-tap был погашен БЕЗ маркера — активный поллер "
++                        "переподнял (правый Option жив)")
++                    # Переход «был жив → погас → оживили»: если в этот момент
++                    # висела длинная запись, её стоп-нажатие могло потеряться —
++                    # авто-стопаем через тот же колбэк, что и реактивный путь.
++                    if prev_enabled and on_reenable is not None:
++                        threading.Thread(target=on_reenable, daemon=True).start()
++                except Exception as e:
++                    logging.error(f"активный поллер не смог переподнять тап: {e}")
++            prev_enabled = enabled
++    threading.Thread(target=_poll_tap_health, daemon=True).start()
++
++    logging.info("tap-keepalive установлен: реактивно + активный поллер здоровья (3с)")
 +
 +
  def _parse_hotkey(s: str) -> set:
      """'<ctrl>+<shift>+<space>' → set of canonical key names"""
      parts = [p.strip().lower() for p in s.replace(" ", "").split("+")]
-@@ -1115,13 +1367,10 @@ def _canonical_key(key) -> str:
+@@ -1115,13 +1462,10 @@ def _canonical_key(key) -> str:
      """Канонизирует key из pynput в строку, совпадающую с _parse_hotkey."""
      from pynput.keyboard import Key, KeyCode
      if isinstance(key, Key):
