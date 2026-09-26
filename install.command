@@ -97,7 +97,8 @@ ok "Конфиг: правый Option (toggle), язык ru, turbo, авто-в�
 
 say "Собираю приложение «Whispee» с иконкой…"
 # иконка .icns из 1024 PNG
-ICONSET="$DIR/.iconset"; rm -rf "$ICONSET"; mkdir -p "$ICONSET"
+# имя папки БЕЗ точки: iconutil (macOS 26) отвергает скрытые папки («Invalid Iconset»)
+ICONSET="$DIR/Icon.iconset"; rm -rf "$ICONSET" "$DIR/.iconset"; mkdir -p "$ICONSET"
 for s in 16 32 128 256 512; do
   sips -z $s $s "$HERE/app_icon_1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1
   d=$((s*2)); sips -z $d $d "$HERE/app_icon_1024.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null 2>&1
